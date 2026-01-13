@@ -1,0 +1,106 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <U8g2lib.h>
+
+#define SDA_PIN 4   // D2 (ESP8266硬件I2C默认SDA)
+#define SCL_PIN 5   // D1 (ESP8266硬件I2C默认SCL)
+const uint8_t AHT_ADDR = 0x38;  // 改为uint8_t消除类型歧义
+
+// 修复OLED初始化：ESP8266硬件I2C不需要指定SCL/SDA引脚（HW_I2C模式下参数无效）
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(
+  U8G2_R0,
+  U8X8_PIN_NONE  // 仅保留复位引脚（无则填NONE），移除SCL/SDA参数
+);
+
+// 触发 AHT30 测量
+bool triggerAHT() {
+  Wire.beginTransmission(AHT_ADDR);
+  Wire.write(0xAC);  // AHT30测量命令
+  Wire.write(0x33);
+  Wire.write(0x00);
+  return (Wire.endTransmission() == 0);
+}
+
+// 读取 AHT30 原始数据并解析（修复Wire.requestFrom类型歧义）
+bool readAHT(float &temperature, float &humidity) {
+  // 初始化变量为无效值，避免读取失败时显示乱码
+  temperature = -99.9;
+  humidity = -99.9;
+  
+  if (!triggerAHT()) return false;
+  delay(80); // AHT30 测量耗时约75ms
+
+  // 修复：两个参数都转为uint8_t，消除类型歧义
+  Wire.requestFrom((uint8_t)AHT_ADDR, (uint8_t)6);
+  if (Wire.available() < 6) return false;
+
+  uint8_t buf[6];
+  for (int i = 0; i < 6; i++) buf[i] = Wire.read();
+
+  // 校验状态位（AHT30第0字节的第7位为0表示正常）
+  if (buf[0] & 0x80) {
+    Serial.println("AHT30 busy!");
+    return false;
+  }
+
+  uint32_t hum_raw =
+      ((uint32_t)buf[1] << 12) |
+      ((uint32_t)buf[2] << 4) |
+      ((uint32_t)buf[3] >> 4);
+
+  humidity = (hum_raw / 1048576.0) * 100.0;
+
+  uint32_t temp_raw =
+      (((uint32_t)(buf[3] & 0x0F)) << 16) |
+      ((uint32_t)buf[4] << 8) |
+      buf[5];
+
+  temperature = (temp_raw / 1048576.0) * 200.0 - 50.0;
+
+  return true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(SDA_PIN, SCL_PIN);  // 初始化I2C引脚（ESP8266需显式指定）
+
+  // 初始化OLED
+  u8g2.begin();
+  u8g2.enableUTF8Print();  // 支持UTF8字符（比如中文，需对应字体）
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_fub14_tr);  // 选择字体
+  u8g2.drawStr(0, 24, "Initializing...");
+  u8g2.sendBuffer();
+  delay(1000);
+}
+
+void loop() {
+  float temp, hum;
+  bool readSuccess = readAHT(temp, hum);
+
+  // 串口打印
+  if (readSuccess) {
+    Serial.printf("Temperature: %.2f °C  Humidity: %.2f %%\n", temp, hum);
+  } else {
+    Serial.println("AHT30 read failed!");
+  }
+
+  // OLED 显示（优化显示逻辑，失败时提示）
+  u8g2.clearBuffer();
+  
+  if (readSuccess) {
+    u8g2.setCursor(0, 24);
+    u8g2.printf("Temp: %.1f °C", temp);
+
+    u8g2.setCursor(0, 54);
+    u8g2.printf("Humi: %.1f %%", hum);
+  } else {
+    u8g2.setCursor(0, 24);
+    u8g2.print("Read Failed!");
+    u8g2.setCursor(0, 54);
+    u8g2.print("Check Sensor");
+  }
+
+  u8g2.sendBuffer();  // 刷新OLED显示
+  delay(1000);  // 1秒刷新一次
+}
